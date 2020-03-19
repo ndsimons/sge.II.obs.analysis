@@ -1,0 +1,319 @@
+---
+title: "SGE II obs analysis"
+output:
+  html_document:
+    code_folding: "hide"
+    toc: true  
+    toc_float: true 
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(EloRating)
+library(httr)
+```
+
+# read in necessary functions
+```{r}
+load(url("https://github.com/ndsimons/sge.II.obs.analysis/blob/master/functions/behavior_functions.RData?raw=true"))
+```
+
+# load individual metadata
+```{r}
+intro_all <- "https://github.com/ndsimons/sge.II.obs.analysis/raw/master/obs.data/intro_all_v2.txt"
+intro_all <- read.delim(intro_all)
+intro_all$ID <- gsub('77_06', 'mo', intro_all$ID)
+```
+
+# read in obs files ( '_1' denotes phase I groups, no underscore are phase II groups); all obs files for a group are concatenated and retain headers
+```{r}
+load(url("https://github.com/ndsimons/sge.II.obs.analysis/blob/master/obs.data/all.obs.files.RData?raw=true"))
+SPF5_1$behavior <- gsub('e2', 'et', SPF5_1$behavior)
+```
+
+# add # of obs per individual to intros_all
+```{r}
+data_list <- list(NSPF1 = NSPF1,NSPF2 = NSPF2,NSPF3 = NSPF3,NSPF4 = NSPF4,NSPF5 = NSPF5,SPF1 = SPF1,SPF2 = SPF2,SPF3 = SPF3,SPF4 = SPF4,SPF5 = SPF5,NSPF1_1 = NSPF1_1,NSPF2_1 = NSPF2_1,NSPF3_1 = NSPF3_1,NSPF4_1 = NSPF4_1,NSPF5_1 = NSPF5_1,SPF1_1 = SPF1_1,SPF2_1 = SPF2_1,SPF3_1 = SPF3_1,SPF4_1 = SPF4_1,SPF5_1 = SPF5_1)
+
+# add in the number of obs per individual
+for (x in names(data_list)) intro_all[which(intro_all[,"group"]==x),"num.obs"]=length(levels(as.factor((data_list[[x]][,"obs.no"]))))
+```
+
+# pull out social behaviors and dominance interactions
+```{r}
+social<-lapply(data_list,convert.soc)
+groom<-lapply(social,function(x){x[which(x[,5]%in%c("GM","G-","ZZ")),]})
+aggs <- lapply(social,function(x){x[which(x[,5]%in%c("TN","TC","AT","CH")),]})
+agg.received<-lapply(aggs,function(x){aggregate(x[,4],by=list(x[,4]),length)})
+groom.received <- lapply(groom,function(x){aggregate(x[,4],by=list(x[,4]),length)})
+```
+
+# generate a grooming data frame
+```{r}
+intro_all<-intro_all[order(intro_all$phase,intro_all$group),]
+
+group <- vector()
+ID1 <- vector()
+ID2 <- vector()
+count <- 1
+
+for (i in unique(intro_all$group)) {
+  id1 <- unique(subset(intro_all, group == i)$ID)
+  for (j in id1){
+    for (k in id1){
+      if (j != k){
+        ID1[count] <- j
+        ID2[count] <- k
+        group[count] <- i
+        count <- count+1
+      }
+    }
+  }
+}
+
+groom.tot<-data.frame(matrix(ncol=12,nrow=354))
+groom.tot$X1 <- ID1
+groom.tot$X2 <- ID2
+groom.tot$X3 <- group
+colnames(groom.tot)<-c("ID1","ID2","group","no.obs","bouts","ID1.groom","ID2.groom","min","ID1.groom.min","ID2.groom.min","ID1.rank","ID2.rank")
+
+# change IDs to short, uppercase IDs
+groom.tot[,1]<-as.character(groom.tot[,1]); groom.tot[,2]<-as.character(groom.tot[,2]); groom.tot[,3]<-as.character(groom.tot[,3])
+groom.tot$ID1 <- toupper(substr(groom.tot$ID1, 1,2))
+groom.tot$ID2 <- toupper(substr(groom.tot$ID2, 1,2))
+groom.tot$ID1 <- gsub('77','MO',groom.tot$ID1)
+groom.tot$ID2 <- gsub('77','MO',groom.tot$ID2)
+intro_all$ID <- toupper((substr(intro_all$ID, 1,2)))
+```
+
+##caclulate grooming bouts
+```{r}
+for (id in 1:nrow(groom.tot)){
+  id1<-groom.tot[id,"ID1"]; id2<-groom.tot[id,"ID2"]; g<-groom[[as.character(groom.tot[id,"group"])]]; b1=0;b2=0;grp<-groom.tot[id,"group"]
+  b1=sum(g[,5]=="GM"&g[,3]==id1 & g[,4]==id2)
+  b2=sum(g[,5]=="GM"&g[,4]==id1 & g[,3]==id2)
+  groom.tot[id,5]=b1+b2;groom.tot[id,6]=b1;groom.tot[id,7]=b2
+  groom.tot[id,4]=intro_all[which(intro_all[,"ID"]==id2&intro_all$group==grp),"num.obs"]
+  groom.tot[id,"ID1.rank"]=intro_all[which(intro_all[,"ID"]==id1&intro_all$group==grp),"elo"]
+  groom.tot[id,"ID2.rank"]=intro_all[which(intro_all[,"ID"]==id2&intro_all$group==grp),"elo"]
+}  
+```
+
+## calculate grooming times
+```{r}
+groom.tot$ID1.groom.min<-NA
+groom.tot$ID2.groom.min<-NA
+groom.tot$min<-NA
+
+for (i in 1:nrow(groom.tot)){
+  id1<-groom.tot[i,"ID1"]; id2<-groom.tot[i,"ID2"]; t1=0;t2=0
+  g<-groom[[as.character(groom.tot[i,"group"])]]
+  if (id1%in%c(g[,3],g[,4])&id2%in%c(g[,3],g[,4])){
+    g<-g[which((g[,4]==id1 & g[,3]==id2 )|(g[,3]==id1 & g[,4]==id2)|g[,3]=="ZZ"),]
+    for (r in 1:nrow(g)){
+      if (g[r,5]=="GM" & g[r,3]==id1 & g[r,4]==id2) t1=t1+(g[r+1,2]-g[r,2])
+      if (g[r,5]=="GM" & g[r,4]==id1 & g[r,3]==id2) t2=t2+(g[r+1,2]-g[r,2])
+    }
+    groom.tot[i,"ID1.groom.min"]=t1
+    groom.tot[i,"ID2.groom.min"]=t2
+    groom.tot[i,"min"]=t1+t2}
+}
+rm(t1);rm(t2);rm(i);rm(id1);rm(id2);rm(r);rm(g)
+
+# add phase
+groom.tot$phase<-NA
+for (i in 1:nrow(groom.tot)){
+  g<-groom.tot[i,"group"]; 
+  tmp <- subset(intro_all, group == g)
+  if (groom.tot[i,"group"] == g){
+    groom.tot$phase[i]= tmp$phase[1]
+  }
+}  
+```
+
+## Plots
+# ranks vs order of intro
+```{r}
+ggplot(intro_all, aes(x=intro_all$intro.no, y=intro_all$elo)) +
+  scale_color_manual(values = c('#999999','#E69F00'), name = 'Phase') +
+  geom_point(aes(color=as.factor(intro_all$phase))) +
+  xlab('Order of introduction') +
+  ylab('Dominance rank (elo)') +
+  stat_smooth(method = 'lm', aes(color=as.factor(intro_all$phase)), se=F) +
+  theme_minimal()
+
+cor.test(intro_all$intro.no[1:49],intro_all$elo[1:49])
+cor.test(intro_all$intro.no[50:94],intro_all$elo[50:94])
+
+# rank vs order of intro per group
+for (i in unique(intro_all$group)){
+  tmp <- subset(intro_all, group == i)
+  print(ggplot(tmp, aes(x=tmp$intro.no, y=tmp$elo)) +
+          geom_point() +
+          xlab('Order of introduction') +
+          ylab('Dominance rank (elo)') +
+          stat_smooth(method = 'lm', color='black') +
+          ggtitle(i) +
+          theme_bw())
+}
+```
+
+## rank vs grooming rate
+# generate a data frame of grooming rates for each phase
+```{r}
+# phase I
+tmp.minutes <- vector()
+tmp.names <- vector()
+tmp.ranks <- vector()
+tmp.obs <- vector()
+tmp.group <- vector()
+for (i in unique(groom.tot$ID1)){
+  tmp <- subset(groom.tot, groom.tot$phase == '1')
+  tmp2 <- sum(subset(tmp, tmp$ID1 == i)$min)
+  tmp.minutes <- cbind(tmp.minutes,tmp2)
+  tmp.names <- cbind(tmp.names,i)
+  tmp.ranks <- cbind(tmp.ranks,subset(tmp, tmp$ID1 == i)$ID1.rank[1])
+  tmp.obs <- cbind(tmp.obs,subset(tmp, tmp$ID1 == i)$no.obs[1])
+  tmp.group <- cbind(tmp.group,subset(tmp, tmp$ID1 == i)$group[1])
+}  
+sge.I.groom.rate.df <- as.data.frame(t(rbind(tmp.names,tmp.ranks,tmp.minutes,tmp.obs,tmp.group)))
+names(sge.I.groom.rate.df) <- c('ID','elo','min','no.obs','group')
+sge.I.groom.rate.df$elo <- as.numeric(as.character(sge.I.groom.rate.df$elo))
+sge.I.groom.rate.df$min <- as.numeric(as.character(sge.I.groom.rate.df$min))
+sge.I.groom.rate.df$no.obs <- as.numeric(as.character(sge.I.groom.rate.df$no.obs))
+sge.I.groom.rate.df$phase <- 1
+sge.I.groom.rate.df <- sge.I.groom.rate.df[1:49,]
+
+# phase II
+tmp.minutes <- vector()
+tmp.names <- vector()
+tmp.ranks <- vector()
+tmp.obs <- vector()
+tmp.group <- vector()
+for (i in unique(groom.tot$ID1)){
+  tmp <- subset(groom.tot, groom.tot$phase == '2')
+  tmp2 <- sum(subset(tmp, tmp$ID1 == i)$min)
+  tmp.minutes <- cbind(tmp.minutes,tmp2)
+  tmp.names <- cbind(tmp.names,i)
+  tmp.ranks <- cbind(tmp.ranks,subset(tmp, tmp$ID1 == i)$ID1.rank[1])
+  tmp.obs <- cbind(tmp.obs,subset(tmp, tmp$ID1 == i)$no.obs[1])
+  tmp.group <- cbind(tmp.group,subset(tmp, tmp$ID1 == i)$group[1])
+}  
+sge.II.groom.rate.df <- as.data.frame(t(rbind(tmp.names,tmp.ranks,tmp.minutes,tmp.obs,tmp.group)))
+names(sge.II.groom.rate.df) <- c('ID','elo','min','no.obs','group')
+sge.II.groom.rate.df$elo <- as.numeric(as.character(sge.II.groom.rate.df$elo))
+sge.II.groom.rate.df$min <- as.numeric(as.character(sge.II.groom.rate.df$min))
+sge.II.groom.rate.df$no.obs <- as.numeric(as.character(sge.II.groom.rate.df$no.obs))
+sge.II.groom.rate.df$phase <- 2
+sge.II.groom.rate.df <- subset(sge.II.groom.rate.df, elo != 'NA')
+sge.II.groom.rate.df[is.na(sge.II.groom.rate.df)] <- 0
+
+sge.groom.rate.df <- rbind(sge.I.groom.rate.df,sge.II.groom.rate.df)
+
+# plot elo vs grooming rate
+ggplot(sge.groom.rate.df,aes(x=sge.groom.rate.df$elo, y=scale(sge.groom.rate.df$min/sge.groom.rate.df$no.obs*2,scale = F))) +
+  scale_color_manual(values = c('#999999','#E69F00'), name = 'Phase') +
+  geom_point(aes(color=as.factor(sge.groom.rate.df$phase))) +
+  xlab('rank (elo)') +
+  ylab('grooming (min/hr)') +
+  geom_abline(intercept = summary(lm(scale(sge.I.groom.rate.df$min/sge.I.groom.rate.df$no.obs*2,scale = F)~sge.I.groom.rate.df$elo))$coefficients[1], slope = summary(lm(scale(sge.I.groom.rate.df$min/sge.I.groom.rate.df$no.obs*2,scale = F)~sge.I.groom.rate.df$elo))$coefficients[2], colour='#999999', lwd = 1.25) +
+  geom_abline(intercept = summary(lm(scale(sge.II.groom.rate.df$min/sge.II.groom.rate.df$no.obs*2,scale = F)~sge.II.groom.rate.df$elo))$coefficients[1], slope = summary(lm(scale(sge.II.groom.rate.df$min/sge.II.groom.rate.df$no.obs*2,scale = F)~sge.II.groom.rate.df$elo))$coefficients[2], colour='#E69F00', lwd = 1.25) +
+  ggtitle('') +
+  ylim(-12,15) +
+  theme_minimal()
+
+cor.test(sge.I.groom.rate.df$elo,sge.I.groom.rate.df$min/sge.I.groom.rate.df$no.obs*2)
+cor.test(sge.II.groom.rate.df$elo,sge.II.groom.rate.df$min/sge.II.groom.rate.df$no.obs*2)
+
+# elo vs grooming rate per group
+for (i in unique(sge.groom.rate.df$group)){
+  tmp <- subset(sge.groom.rate.df, sge.groom.rate.df$group == i)
+  print(ggplot(tmp, aes(x=tmp[,"elo"], y=(scale(tmp[,"min"]/tmp[,"no.obs"]*2,scale = F)))) +
+          geom_point() +
+          xlab('rank (elo)') +
+          ylab('grooming (min/hr)') +
+          stat_smooth(method = 'lm', color='black') +
+          ggtitle(i) +
+          theme_minimal())
+}
+```
+
+# plot delta(elo) vs delta(grooming rate)
+```{r}
+delta_sub <- merge(sge.I.groom.rate.df, sge.II.groom.rate.df, by='ID')
+delta_elo <- delta_sub$elo.y - delta_sub$elo.x
+delta_groom <- scale(delta_sub$min.y/delta_sub$no.obs.y*2,scale = F) - scale(delta_sub$min.x/delta_sub$no.obs.x*2,scale = F)
+
+ggplot(sge.groom.rate.df[1:40,],aes(x = delta_elo, y = delta_groom)) + 
+  geom_point() +
+  xlab('Δ rank (elo)') +
+  ylab('Δ grooming ' )+  
+  #ylim(-10,20) +
+  theme_minimal() +
+  stat_smooth(method = 'lm', color='black')
+
+summary(lm(delta_groom ~ delta_elo))
+```
+
+# plot elo vs aggression received
+```{r}
+agg <- vector()
+name <- vector()
+group <- vector()
+for (i in unique(intro_all$group)){
+  tmp3 <- agg.received[[i]]$Group.1
+  tmp4 <- agg.received[[i]]$x
+  tmp5 <- rep(i,length(tmp3))
+  agg <- c(agg,tmp4)
+  name <- c(name,tmp3)
+  group <- c(group,tmp5)
+}
+tmp <- as.data.frame(cbind(agg,name,group))
+tmp <- tmp[!(tmp$name=="ZZ"),]
+tmp$agg <- as.numeric(as.character(tmp$agg))
+tmp$id.group <- paste(tmp$name,tmp$group, sep='_')
+
+intro_all$agg.received <- NA
+intro_sub <- intro_all
+intro_sub$id.group <- paste(intro_sub$ID,intro_sub$group, sep='_')
+intro_sub <- subset(intro_sub, intro_sub$id.group %in% tmp$id.group)
+tmp <- subset(tmp, tmp$id.group %in% intro_sub$id.group)
+intro_sub <- intro_sub[match(tmp$id.group, intro_sub$id.group),]
+intro_sub$agg.received <- tmp$agg
+# add zero rows back in
+intro_all$id.group <- paste(intro_all$ID,intro_all$group, sep='_')
+tmp <- subset(intro_all, !(intro_all$id.group %in% intro_sub$id.group))
+intro_sub <- rbind.data.frame(intro_sub,tmp)
+
+#plot
+tmp_1 <- subset(intro_sub, phase == 'SGE1')
+tmp_2 <- subset(intro_sub, phase == 'SGE2')
+
+ggplot(intro_sub,aes(x=intro_sub$elo, y=c(scale(tmp_1$agg.received/tmp_1$num.obs*2,scale = F),scale(tmp_2$agg.received/tmp_2$num.obs*2,scale = F)))) +
+  scale_color_manual(values = c('#999999','#E69F00'), name = 'Phase') +
+  geom_point(aes(color=as.factor(intro_sub$phase))) +
+  xlab('rank (elo)') +
+  ylab('agression received (per hr)') +
+  geom_abline(intercept = summary(lm(scale(tmp_1$agg.received/tmp_1$num.obs*2,scale = F)~tmp_1$elo))$coefficients[1], slope = summary(lm(scale(tmp_1$agg.received/tmp_1$num.obs*2,scale = F)~tmp_1$elo))$coefficients[2], colour='#999999', lwd = 1.25) +
+  geom_abline(intercept = summary(lm(scale(tmp_2$agg.received/tmp_2$num.obs*2,scale = F)~tmp_2$elo))$coefficients[1], slope = summary(lm(scale(tmp_2$agg.received/tmp_2$num.obs*2,scale = F)~tmp_2$elo))$coefficients[2], colour='#E69F00', lwd = 1.25) +
+  ylim(-8,14) +
+  ggtitle('') +
+  theme_minimal()
+
+cor.test(tmp_1$elo,scale(tmp_1$agg.received/tmp_1$num.obs*2,scale = F))
+cor.test(tmp_2$elo,scale(tmp_2$agg.received/tmp_2$num.obs*2,scale = F))
+
+# by group
+for (i in unique(intro_sub$group)){
+  tmp <- subset(intro_sub, group == i)
+  print(ggplot(tmp, aes(tmp$elo,scale(tmp$agg.received/tmp$num.obs*2,scale = F))) +
+          geom_point() +
+          xlab('rank (elo)') +
+          ylab('aggression received') +
+          stat_smooth(method = 'lm', color='black') +
+          theme_minimal() +
+          ggtitle(i))        
+}
+```
